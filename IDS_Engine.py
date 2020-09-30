@@ -26,7 +26,6 @@ attack_type = ['Normal', 'Fuzzers', 'Dos', 'Exploits', 'Generic', 'Reconnaissanc
 
 # reserve_1 用于记录三次握手相关信息，不是特征
 http_methods = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'TRACE', 'OPTIONS', 'CONNECT']
-Device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # 进入后首先进行初始化。
 for flow in flows:
@@ -445,8 +444,13 @@ def data_assign(data, Device):
     return feature
 
 # model = ConvNet().to(Device)
-model = ConvNet_multi().to(Device)
-model.load_state_dict(torch.load(r'./dl-ids-multi.pth')['net'])  # 引入之前训练好的神经网络
+model = ConvNet_multi()
+model_file = os.path.split(os.path.realpath(__file__))[0] + r'/dl-ids-multi.pth'
+model.load_state_dict(torch.load(model_file, map_location= 'cuda' if torch.cuda.is_available() else 'cpu')['net'])
+Device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = model.to(Device)
+# model.load_state_dict(torch.load(r'./dl-ids-multi.pth')['net'])  # 引入之前训练好的神经网络
+
 
 def predict(num):
     """用于预测流量的好坏"""
