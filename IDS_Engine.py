@@ -15,12 +15,15 @@ init = [0,0,0,0]
 conn = False  # 三次握手的标志位
 control_gate = [0, 0, 0, 0]  # 用于表示控制程度
 packet_num = [0, 0, 0, 0]  # 用于记录连接通过的包数量
-access_control = 7  # 用于控制对于潜在攻击的敏感程度
+access_control = 25  # 用于控制对于潜在攻击的敏感程度
 features = ['state', 'dur', 'sbytes', 'dbytes', 'sttl', 'dttl', 'sloss', 'dloss', 'service', 'sload', 'dload', 'spkts'
             , 'dpkts', 'swin', 'dwin', 'stcpb', 'dtcpb', 'smeansz', 'dmeansz', 'trans_depth', 'res_bdy_len', 'sjit', 'djit',
             'stime', 'ltime', 'sintpkt', 'dintpkt', 'tcprtt', 'synack', 'ackdat', 'is_sm_ips_ports', 'ct_state_ttl',
             'ct_flw_http_mthd', 'ls_ftp_login', 'ct_ftp_cmd', 'ct_srv_src', 'ct_srv_dst' , 'ct_dst_ltm', 'ct_src_ltm',
             'ct_src_dport_ltm', 'ct_dst_sport_ltm', 'ct_dst_src_ltm', 'packet_num', 'reserve_1']
+attack_type = ['Normal', 'Fuzzers', 'Dos', 'Exploits', 'Generic', 'Reconnaissance',
+               'Shellcode']
+
 # reserve_1 用于记录三次握手相关信息，不是特征
 http_methods = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'TRACE', 'OPTIONS', 'CONNECT']
 Device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -383,6 +386,57 @@ class ConvNet(nn.Module):
         out = self.softmax(out)
         return out
 
+class ConvNet_multi(nn.Module):
+    # 用于构建多分类模型
+    def __init__(self):
+        super(ConvNet_multi, self).__init__()
+        # class torch.nn.Conv1d(in_channels, out_channels, kernel_size,
+        # stride=1, padding=0, dilation=1, groups=1, bias=True)
+        self.conv1 = nn.Conv1d(in_channels=1, out_channels=64, kernel_size=3)
+        self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3)
+        self.conv3 = nn.Conv1d(in_channels=128, out_channels=128, kernel_size=3)
+        self.conv4 = nn.Conv1d(in_channels=128, out_channels=128, kernel_size=3)
+        self.lstm1 = nn.LSTM(input_size=4, hidden_size=48, num_layers=2, batch_first=True) # 11/4
+        self.gru1 = nn.GRU(input_size=11, hidden_size=48, num_layers=2, batch_first=True)
+        # self.conv3 = nn.Conv1d(in_channels=128, out_channels=256, kernel_size=3)
+        self.maxpool = nn.MaxPool1d(kernel_size=2, ceil_mode=True)
+        self.avgpool = nn.AvgPool1d(kernel_size=2, ceil_mode=True)
+        # 1 * 256 * x
+        # self.fc1 = nn.Linear(6144, 1024) # with lstm
+        self.fc1 = nn.Linear(6144, 128) # without lstm
+        # self.fc2 = nn.Linear(1024, 2)
+        # 用于多分类-9个类
+        # self.fc2 = nn.Linear(1024, 7) # with lstm
+        self.fc2 = nn.Linear(128, 7) # without lstm
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, x):
+        in_size = x.size(0)
+        out = self.conv1(x)
+        out = F.gelu(out) # 1, 64, 39
+#        out = self.maxpool(out)# 1, 64, 20
+        out = self.conv2(out)
+        out = F.gelu(out)
+        out = self.maxpool(out)
+        out = self.conv3(out)
+        out = F.gelu(out)
+        out = self.conv4(out)
+        out = F.gelu(out)
+        out = self.maxpool(out)
+        out, (h, c) = self.lstm1(out) # 1, 64, 70
+        # out, h = self.gru1(out)
+        # Flatten()
+        out = out.contiguous().view(in_size, -1)
+
+        out = F.dropout(out, p=0.25)
+        out = self.fc1(out)
+        out = F.gelu(out)
+        out = F.dropout(out, p=0.5)
+        out = self.fc2(out)
+        out = F.gelu(out)
+        out = self.softmax(out)
+        return out
+
 def data_assign(data, Device):
     print('------------------------------')
     # print(data)
@@ -390,8 +444,9 @@ def data_assign(data, Device):
     feature = feature.to(Device)
     return feature
 
-model = ConvNet().to(Device)
-model.load_state_dict(torch.load(r'./dl-ids.pth')['net'])  # 引入之前训练好的神经网络
+# model = ConvNet().to(Device)
+model = ConvNet_multi().to(Device)
+model.load_state_dict(torch.load(r'./dl-ids-multi.pth')['net'])  # 引入之前训练好的神经网络
 
 def predict(num):
     """用于预测流量的好坏"""
@@ -406,11 +461,11 @@ def predict(num):
     if output == 0:
         # 正常流量
         print(datetime.datetime.now(), ":    经过1条正常流量。")
-        return False
+        return False, output
     else:
         # 攻击流量
         print(datetime.datetime.now(), ":    经过1条潜在攻击流量。")
-        return True
+        return True, output
 
 def IDS(data, *args):
     """data 为原始包数据， args[0]为时间戳数据"""
@@ -422,7 +477,7 @@ def IDS(data, *args):
         print("源数据ip地址非本网段，建议丢弃流量。")
     elif num == -3:
         print("流量传输层协议类型不符合IDS要求，建议丢弃。")
-    tmp = predict(num)
+    tmp, output = predict(num)
     packet_num[num] += 1
     if tmp:
         # 用于处理发生攻击时的操作
@@ -430,22 +485,22 @@ def IDS(data, *args):
         if control_gate[num] > access_control:
             print("当前连接安全性计数为:%d, 通过的数据包数量为:%d"%(control_gate[num], packet_num[num]))
             #  print("异常包占比:%f%%" % (100. * control_gate[num] / packet_num[num]))
-            print("判定为： 攻击")
+            print("判定为： %s攻击" % (attack_type[output]))
             print('------------------------------')
-            return "DOS"
+            return attack_type[output]
         else:
             print("当前连接安全性计数为:%d, 通过的数据包数量为:%d"%(control_gate[num], packet_num[num]))
             #  print("异常包占比:%f%%" % (100. * control_gate[num] / packet_num[num]))
             print("判定为： 安全")
             print('------------------------------')
-        return "SAFE"
+            return 'Normal'
     else:
         # 用于处理了未发生攻击时的操作
         print("当前连接安全性计数为:%d, 通过的数据包数量为:%d" % (control_gate[num], packet_num[num]))
         #  print("异常包占比:%f%%" % (100. * control_gate[num] / packet_num[num]))
         print("判定为： 安全")
         print('------------------------------')
-        return "SAFE"
+        return 'Normal'
 
 '''
 if __name__ == '__main__':
